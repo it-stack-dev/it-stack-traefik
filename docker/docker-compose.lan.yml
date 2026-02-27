@@ -1,0 +1,36 @@
+# Lab 02 — External Dependencies: traefik with external PostgreSQL and Redis
+---
+services:
+  traefik:
+    image: traefik:v3.0
+    container_name: it-stack-traefik
+    restart: unless-stopped
+    ports:
+      - "80:$firstPort"
+    environment:
+      - IT_STACK_ENV=lab-02-lan
+      - DB_HOST=
+      - DB_PORT=5432
+      - REDIS_HOST=
+    networks:
+      - it-stack-net
+
+  # Lightweight local DB for lab (replace with lab-db1 in real env)
+  postgres:
+    image: postgres:16
+    container_name: it-stack-traefik-db
+    environment:
+      POSTGRES_DB: traefik_db
+      POSTGRES_USER: traefik_user
+      POSTGRES_PASSWORD: traefik_pass
+    volumes:
+      - traefik_pg_data:/var/lib/postgresql/data
+    networks:
+      - it-stack-net
+
+networks:
+  it-stack-net:
+    driver: bridge
+
+volumes:
+  traefik_pg_data:

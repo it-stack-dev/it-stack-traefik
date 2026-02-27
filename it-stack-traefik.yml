@@ -1,0 +1,58 @@
+# it-stack-traefik.yml — IT-Stack Module Manifest
+# Module 18: Traefik reverse proxy and load balancer
+
+module:
+  name: traefik
+  number: "18"
+  repo: it-stack-dev/it-stack-traefik
+  version: "0.1.0"
+  phase: 1
+  category: infrastructure
+  server: lab-proxy1
+  description: "Traefik reverse proxy and load balancer"
+
+upstream:
+  name: Traefik
+  image: traefik:v3.0
+  license: MIT
+
+ports:
+  - 80 (HTTP)
+   - 443 (HTTPS)
+   - 8080 (Dashboard)
+
+labs:
+  - id: "18-01"
+    name: Standalone
+    docker_compose: docker/docker-compose.standalone.yml
+    test_script: tests/labs/test-lab-18-01.sh
+  - id: "18-02"
+    name: External Dependencies
+    docker_compose: docker/docker-compose.lan.yml
+    test_script: tests/labs/test-lab-18-02.sh
+  - id: "18-03"
+    name: Advanced Features
+    docker_compose: docker/docker-compose.advanced.yml
+    test_script: tests/labs/test-lab-18-03.sh
+  - id: "18-04"
+    name: SSO Integration
+    docker_compose: docker/docker-compose.sso.yml
+    test_script: tests/labs/test-lab-18-04.sh
+  - id: "18-05"
+    name: Advanced Integration
+    docker_compose: docker/docker-compose.integration.yml
+    test_script: tests/labs/test-lab-18-05.sh
+  - id: "18-06"
+    name: Production Deployment
+    docker_compose: docker/docker-compose.production.yml
+    test_script: tests/labs/test-lab-18-06.sh
+
+resources:
+  cpu_cores: 2
+  ram_gb: 2
+  disk_gb: 20
+
+health_check:
+  endpoint: /health
+  metrics_endpoint: /metrics
+  log_path: /var/log/traefik/

@@ -1,0 +1,29 @@
+# Lab 01 — Standalone: Complete Traefik reverse proxy and load balancer in isolation
+# No external dependencies required.
+---
+services:
+  traefik:
+    image: traefik:v3.0
+    container_name: it-stack-traefik
+    restart: unless-stopped
+    ports:
+      - "80:$firstPort"
+    environment:
+      - IT_STACK_ENV=lab-01-standalone
+    volumes:
+      - traefik_data:/var/lib/traefik
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - it-stack-net
+
+networks:
+  it-stack-net:
+    driver: bridge
+
+volumes:
+  traefik_data:
