@@ -1,36 +1,140 @@
-# Lab 02 — External Dependencies: traefik with external PostgreSQL and Redis
----
+# Lab 18-02: External Dependencies — Traefik TLS + Middleware Chains
+# Purpose: HTTPS with Let's Encrypt (staging CA), multiple real backends,
+#          middleware chains (security headers, rate limiting, redirects).
+#
+# Usage:
+#   docker compose -f docker/docker-compose.lan.yml up -d
+#   HTTP (auto-redirects):  http://localhost:80
+#   HTTPS:                  https://localhost:443  (self-signed in lab)
+#   Dashboard:              https://localhost:8080 (TLS)
+#
+# Note: Let's Encrypt staging is used — certs are valid structurally but
+# issued by a staging CA (untrusted by browsers; use -k with curl).
+# In production, change caServer to the production ACME URL.
+
 services:
+
+  # ─── TRAEFIK ─────────────────────────────────────────────────────────────
   traefik:
-    image: traefik:v3.0
-    container_name: it-stack-traefik
+    image: traefik:v3
+    container_name: it-stack-traefik-lan
     restart: unless-stopped
+    command:
+      # API + Dashboard (TLS)
+      - --api=true
+      - --api.dashboard=true
+      - --ping=true
+      # Providers
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=traefik-net
+      # Entrypoints
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.traefik.address=:8080
+      # TLS — Let's Encrypt staging (replace caServer for production)
+      - --certificatesresolvers.le.acme.email=admin@lab.localhost
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      - --certificatesresolvers.le.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory
+      # Logging
+      - --log.level=INFO
+      - --accesslog=true
     ports:
-      - "80:$firstPort"
-    environment:
-      - IT_STACK_ENV=lab-02-lan
-      - DB_HOST=
-      - DB_PORT=5432
-      - REDIS_HOST=
-    networks:
-      - it-stack-net
-
-  # Lightweight local DB for lab (replace with lab-db1 in real env)
-  postgres:
-    image: postgres:16
-    container_name: it-stack-traefik-db
-    environment:
-      POSTGRES_DB: traefik_db
-      POSTGRES_USER: traefik_user
-      POSTGRES_PASSWORD: traefik_pass
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
     volumes:
-      - traefik_pg_data:/var/lib/postgresql/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - le-certs:/letsencrypt
     networks:
-      - it-stack-net
+      - traefik-net
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    labels:
+      - "traefik.enable=true"
+      # Dashboard router (HTTPS, basic auth)
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.lab.localhost`)"
+      - "traefik.http.routers.dashboard.entrypoints=traefik"
+      - "traefik.http.routers.dashboard.service=api@internal"
 
-networks:
-  it-stack-net:
-    driver: bridge
+  # ─── BACKEND: WHOAMI-A (host routing + security headers) ─────────────────
+  app-a:
+    image: traefik/whoami
+    container_name: it-stack-app-a
+    restart: unless-stopped
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app-a.rule=Host(`app-a.lab.localhost`)"
+      - "traefik.http.routers.app-a.entrypoints=websecure"
+      - "traefik.http.routers.app-a.tls=true"
+      - "traefik.http.routers.app-a.middlewares=security-headers@docker"
+      # Security headers middleware
+      - "traefik.http.middlewares.security-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.security-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.security-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.security-headers.headers.frameDeny=true"
+      - "traefik.http.middlewares.security-headers.headers.browserXssFilter=true"
+
+  # ─── BACKEND: WHOAMI-B (rate limited) ────────────────────────────────────
+  app-b:
+    image: traefik/whoami
+    container_name: it-stack-app-b
+    restart: unless-stopped
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app-b.rule=Host(`app-b.lab.localhost`)"
+      - "traefik.http.routers.app-b.entrypoints=websecure"
+      - "traefik.http.routers.app-b.tls=true"
+      - "traefik.http.routers.app-b.middlewares=rate-limit@docker"
+      # Rate limit: 10 req/sec burst 20
+      - "traefik.http.middlewares.rate-limit.ratelimit.average=10"
+      - "traefik.http.middlewares.rate-limit.ratelimit.burst=20"
+
+  # ─── BACKEND: LOAD BALANCED (3 replicas) ─────────────────────────────────
+  app-lb:
+    image: traefik/whoami
+    restart: unless-stopped
+    deploy:
+      replicas: 3
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app-lb.rule=Host(`lb.lab.localhost`)"
+      - "traefik.http.routers.app-lb.entrypoints=websecure"
+      - "traefik.http.routers.app-lb.tls=true"
+
+  # ─── BACKEND: PATH ROUTING + STRIPPREFIX ─────────────────────────────────
+  api-echo:
+    image: traefik/whoami
+    container_name: it-stack-api-echo
+    restart: unless-stopped
+    networks:
+      - traefik-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api-echo.rule=PathPrefix(`/api/v1/echo`)"
+      - "traefik.http.routers.api-echo.entrypoints=websecure"
+      - "traefik.http.routers.api-echo.tls=true"
+      - "traefik.http.routers.api-echo.middlewares=strip-api@docker"
+      - "traefik.http.middlewares.strip-api.stripprefix.prefixes=/api/v1/echo"
 
 volumes:
-  traefik_pg_data:
+  le-certs:
+    name: it-stack-traefik-le-certs
+
+networks:
+  traefik-net:
+    name: it-stack-traefik-net
+    driver: bridge
