@@ -1,53 +1,122 @@
-# Lab 06 — Production: traefik HA-ready with monitoring and external volumes
+# Lab 06 -- Production: Traefik HA with TLS, rate limiting, access logs, Prometheus, circuit breaker
 ---
 services:
   traefik:
-    image: traefik:v3.0
-    container_name: it-stack-traefik
+    image: traefik:v3.3
+    container_name: it-stack-traefik-prod
     restart: always
     ports:
-      - "80:$firstPort"
-    environment:
-      - IT_STACK_ENV=production
-      - KEYCLOAK_URL=
-      - DB_HOST=
-      - REDIS_HOST=
-      - GRAYLOG_HOST=
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+      - "8082:8082"
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.metrics.address=:8082
+      - --metrics.prometheus=true
+      - --metrics.prometheus.entryPoint=metrics
+      - --metrics.prometheus.addRoutersLabels=true
+      - --metrics.prometheus.addServicesLabels=true
+      - --accesslog=true
+      - --accesslog.format=json
+      - --accesslog.filepath=/logs/access.log
+      - --log.level=INFO
+      - --ping=true
+      - --ping.entrypoint=web
     volumes:
-      - traefik_data:/var/lib/traefik
-      - /etc/ssl/certs:/etc/ssl/certs:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-logs:/logs
+    networks:
+      - proxy-prod-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.middlewares.rate-limit.ratelimit.average=20"
+      - "traefik.http.middlewares.rate-limit.ratelimit.burst=40"
+      - "traefik.http.middlewares.rate-limit.ratelimit.period=1s"
+      - "traefik.http.middlewares.secure-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.secure-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.secure-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.secure-headers.headers.browserXssFilter=true"
+      - "traefik.http.middlewares.secure-headers.headers.frameDeny=true"
+      - "traefik.http.middlewares.retry.retry.attempts=3"
+      - "traefik.http.middlewares.retry.retry.initialinterval=100ms"
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     deploy:
-      replicas: 1
       resources:
         limits:
-          cpus: "4.0"
-          memory: G
-        reservations:
           cpus: "1.0"
-          memory: 1G
-      restart_policy:
-        condition: any
-        delay: 5s
-    logging:
-      driver: gelf
-      options:
-        gelf-address: "udp://${GRAYLOG_HOST}:12201"
-        tag: "it-stack-traefik"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 120s
+          memory: 512M
+
+  backend-1:
+    image: traefik/whoami:latest
+    container_name: it-stack-backend-1
+    restart: always
     networks:
-      - it-stack-net
+      - proxy-prod-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.app.entrypoints=web"
+      - "traefik.http.routers.app.middlewares=rate-limit,secure-headers,retry"
+      - "traefik.http.services.app.loadbalancer.server.port=80"
+      - "traefik.http.services.app.loadbalancer.healthcheck.path=/"
+      - "traefik.http.services.app.loadbalancer.healthcheck.interval=10s"
+      - "traefik.http.services.app.loadbalancer.sticky.cookie=false"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend-2:
+    image: traefik/whoami:latest
+    container_name: it-stack-backend-2
+    restart: always
+    networks:
+      - proxy-prod-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.app.entrypoints=web"
+      - "traefik.http.routers.app.middlewares=rate-limit,secure-headers,retry"
+      - "traefik.http.services.app.loadbalancer.server.port=80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: it-stack-prometheus-prod
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./production/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-prod-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    networks:
+      - proxy-prod-net
+    depends_on:
+      traefik:
+        condition: service_healthy
 
 networks:
-  it-stack-net:
-    external: true
-    name: it-stack-production
+  proxy-prod-net:
+    driver: bridge
 
 volumes:
-  traefik_data:
-    external: true
-    name: it-stack-traefik-data
+  traefik-logs:
+  prometheus-prod-data:

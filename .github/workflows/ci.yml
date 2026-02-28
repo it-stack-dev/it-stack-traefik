@@ -33,11 +33,9 @@ jobs:
           echo "Validating: docker/docker-compose.integration.yml"
           docker compose -f docker/docker-compose.integration.yml config -q
           echo "OK: docker/docker-compose.integration.yml"
-          for f in docker/docker-compose.production.yml; do
-            echo "Checking scaffold: $f"
-            docker compose -f "$f" config --no-interpolate -q 2>&1 && echo "OK: $f" \
-              || echo "WARN: $f has placeholder variables (scaffold — not yet built out)"
-          done
+          echo "Validating: docker/docker-compose.production.yml"
+          docker compose -f docker/docker-compose.production.yml config -q
+          echo "OK: docker/docker-compose.production.yml"
 
       - name: ShellCheck — lab test scripts
         run: |
@@ -247,3 +245,34 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker compose -f docker/docker-compose.integration.yml down -v
+
+  lab-06-smoke:
+    name: Lab 06 — Traefik Production (TLS, rate-limit, access logs, Prometheus)
+    runs-on: ubuntu-latest
+    needs: validate
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get install -y curl
+
+      - name: Start production stack
+        run: docker compose -f docker/docker-compose.production.yml up -d
+
+      - name: Wait for Traefik API
+        run: timeout 60 bash -c 'until curl -sf http://localhost:8080/api/version | grep -q Version; do sleep 3; done'
+
+      - name: Wait for backends
+        run: timeout 60 bash -c 'until curl -sf http://localhost/ | grep -q Hostname; do sleep 3; done'
+
+      - name: Run Lab 18-06 test script
+        run: bash tests/labs/test-lab-18-06.sh
+
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose -f docker/docker-compose.production.yml logs
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f docker/docker-compose.production.yml down -v
