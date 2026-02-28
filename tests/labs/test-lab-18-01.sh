@@ -148,7 +148,7 @@ fi
 # 3.6 Load balancing across whoami-lb replicas
 info "3.6 — Load balancing"
 HOSTS=()
-for i in 1 2 3 4; do
+for _ in 1 2 3 4; do
   H=$(curl -sf -H 'Host: lb.lab.localhost' "${TRAEFIK_HTTP}/" 2>/dev/null \
       | grep -i 'Hostname:' | awk '{print $2}' || true)
   HOSTS+=("${H}")
