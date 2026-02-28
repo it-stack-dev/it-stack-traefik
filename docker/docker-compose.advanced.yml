@@ -1,34 +1,130 @@
-# Lab 03 — Advanced Features: traefik with TLS, resource limits, logging
----
-services:
-  traefik:
-    image: traefik:v3.0
-    container_name: it-stack-traefik
-    restart: unless-stopped
-    ports:
-      - "80:$firstPort"
-    environment:
-      - IT_STACK_ENV=lab-03-advanced
-      - TLS_ENABLED=true
-    volumes:
-      - traefik_data:/var/lib/traefik
-      - ./certs:/etc/ssl/certs:ro
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: G
-    logging:
-      driver: json-file
-      options:
-        max-size: "100m"
-        max-file: "5"
-    networks:
-      - it-stack-net
+# Lab 18-03: Advanced Features — Prometheus metrics + TCP routing + middleware chains
+# Purpose: Production observability, TCP proxying, advanced middleware composition
+#
+# Usage:
+#   docker compose -f docker/docker-compose.advanced.yml up -d
+#   Dashboard:       http://localhost:8080/dashboard/
+#   Metrics:         http://localhost:8082/metrics
+#   App (HTTPS):     https://localhost:443
+#   TCP echo:        nc localhost 9000
 
-networks:
-  it-stack-net:
-    driver: bridge
+services:
+
+  # ─── TRAEFIK v3 with full observability ──────────────────────────────────
+  traefik:
+    image: traefik:v3.2
+    container_name: it-stack-traefik-adv
+    restart: unless-stopped
+    command:
+      # API / dashboard
+      - "--api.insecure=true"
+      - "--api.dashboard=true"
+      # Entrypoints
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.metrics.address=:8082"
+      - "--entrypoints.tcpecho.address=:9000"
+      # HTTP -> HTTPS redirect
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.web.http.redirections.entrypoint.permanent=true"
+      # Providers
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      # Prometheus metrics
+      - "--metrics.prometheus=true"
+      - "--metrics.prometheus.entrypoint=metrics"
+      - "--metrics.prometheus.addrouterslabels=true"
+      - "--metrics.prometheus.addserviceslabels=true"
+      # Access logs
+      - "--accesslog=true"
+      - "--accesslog.filepath=/var/log/traefik/access.log"
+      - "--accesslog.format=json"
+      - "--accesslog.fields.headers.names.User-Agent=keep"
+      # Ping
+      - "--ping=true"
+      - "--ping.entrypoint=web"
+      # TLS self-signed for lab
+      - "--entrypoints.websecure.http.tls=true"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+      - "8082:8082"
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./advanced/traefik-dynamic.yml:/etc/traefik/dynamic/dynamic.yml:ro
+      - traefik-logs:/var/log/traefik
+    networks:
+      - traefik-adv-net
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── APP-A: security headers middleware ──────────────────────────────────
+  app-a:
+    image: traefik/whoami:latest
+    container_name: it-stack-app-a-adv
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app-a.rule=Host(`app-a.lab.localhost`)"
+      - "traefik.http.routers.app-a.entrypoints=websecure"
+      - "traefik.http.routers.app-a.middlewares=security-headers@file,compress@file"
+      - "traefik.http.services.app-a.loadbalancer.server.port=80"
+    networks:
+      - traefik-adv-net
+
+  # ─── APP-B: rate limit + retry middleware ────────────────────────────────
+  app-b:
+    image: traefik/whoami:latest
+    container_name: it-stack-app-b-adv
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app-b.rule=Host(`app-b.lab.localhost`)"
+      - "traefik.http.routers.app-b.entrypoints=websecure"
+      - "traefik.http.routers.app-b.middlewares=rate-limit@file,retry@file"
+      - "traefik.http.services.app-b.loadbalancer.server.port=80"
+    networks:
+      - traefik-adv-net
+
+  # ─── APP-C: circuit breaker middleware ───────────────────────────────────
+  app-c:
+    image: traefik/whoami:latest
+    container_name: it-stack-app-c-adv
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app-c.rule=Host(`app-c.lab.localhost`)"
+      - "traefik.http.routers.app-c.entrypoints=websecure"
+      - "traefik.http.routers.app-c.middlewares=circuit-breaker@file"
+      - "traefik.http.services.app-c.loadbalancer.server.port=80"
+    networks:
+      - traefik-adv-net
+
+  # ─── TCP ECHO service ─────────────────────────────────────────────────────
+  tcp-echo:
+    image: alpine:3.19
+    container_name: it-stack-tcp-echo
+    restart: unless-stopped
+    command: sh -c "apk add --no-cache ncat -q && ncat -l -k -p 4242 --sh-exec 'cat'"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.tcp.routers.tcp-echo.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.tcp-echo.entrypoints=tcpecho"
+      - "traefik.tcp.services.tcp-echo.loadbalancer.server.port=4242"
+    networks:
+      - traefik-adv-net
 
 volumes:
-  traefik_data:
+  traefik-logs:
+
+networks:
+  traefik-adv-net:
+    driver: bridge

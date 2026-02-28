@@ -1,0 +1,47 @@
+# Traefik Lab 03 — Dynamic configuration
+# Defines the middleware chain library used by Lab 03 routers
+
+http:
+  middlewares:
+
+    # ── Security headers ─────────────────────────────────────────────────────
+    security-headers:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+        customResponseHeaders:
+          X-Powered-By: ""
+          Server: ""
+
+    # ── Gzip compression ─────────────────────────────────────────────────────
+    compress:
+      compress:
+        minResponseBodyBytes: 1024
+
+    # ── Rate limiting ─────────────────────────────────────────────────────────
+    rate-limit:
+      rateLimit:
+        average: 20
+        burst: 50
+
+    # ── Retry on upstream error ───────────────────────────────────────────────
+    retry:
+      retry:
+        attempts: 3
+        initialInterval: "100ms"
+
+    # ── Circuit breaker ───────────────────────────────────────────────────────
+    circuit-breaker:
+      circuitBreaker:
+        expression: "ResponseCodeRatio(500, 600, 0, 600) > 0.25 || NetworkErrorRatio() > 0.10"
+
+    # ── Basic Auth (admin:Lab03Password!) ─────────────────────────────────────
+    # Generated with: echo $(htpasswd -nbs admin Lab03Password!) | sed -e s/\\$/\\$\\$/g
+    basic-auth:
+      basicAuth:
+        users:
+          - "admin:$$apr1$$lab03pwd$$hashplaceholder"
+        realm: "IT-Stack Lab"
