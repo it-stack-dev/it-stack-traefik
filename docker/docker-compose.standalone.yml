@@ -1,29 +1,89 @@
-# Lab 01 — Standalone: Complete Traefik reverse proxy and load balancer in isolation
-# No external dependencies required.
+# Lab 18-01 — Standalone: Traefik v3 reverse proxy in complete isolation
+# Purpose : Verify Traefik routing, dashboard, ping, and middleware
+# Duration: 20–30 minutes  |  Machines: 1
+# Usage   : docker compose -f docker/docker-compose.standalone.yml up -d
 ---
 services:
   traefik:
-    image: traefik:v3.0
-    container_name: it-stack-traefik
+    image: traefik:v3.1
+    container_name: it-stack-traefik-lab01
     restart: unless-stopped
+    command:
+      # API & Dashboard (no auth in standalone — add middleware in production)
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+      # Ping healthcheck endpoint
+      - "--ping=true"
+      - "--ping.entryPoint=web"
+      # Entrypoints
+      - "--entrypoints.web.address=:80"
+      # Docker provider via socket
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=it-stack-net"
+      # Logging
+      - "--log.level=INFO"
+      - "--accesslog=true"
     ports:
-      - "80:$firstPort"
-    environment:
-      - IT_STACK_ENV=lab-01-standalone
+      - "80:80"
+      - "8080:8080"
     volumes:
-      - traefik_data:/var/lib/traefik
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - it-stack-net
+
+  # Mock backend A — routes via /whoami
+  whoami-a:
+    image: traefik/whoami:latest
+    container_name: it-stack-whoami-a-lab01
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.whoami-a.rule=Host(`app-a.lab.localhost`)"
+      - "traefik.http.routers.whoami-a.entrypoints=web"
+      - "traefik.http.services.whoami-a.loadbalancer.server.port=80"
+    networks:
+      - it-stack-net
+
+  # Mock backend B — routes via /api path prefix
+  whoami-b:
+    image: traefik/whoami:latest
+    container_name: it-stack-whoami-b-lab01
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.whoami-b.rule=Host(`app-b.lab.localhost`)"
+      - "traefik.http.routers.whoami-b.entrypoints=web"
+      - "traefik.http.services.whoami-b.loadbalancer.server.port=80"
+      # StripPrefix middleware demo
+      - "traefik.http.routers.whoami-b-path.rule=PathPrefix(`/api/echo`)"
+      - "traefik.http.routers.whoami-b-path.entrypoints=web"
+      - "traefik.http.routers.whoami-b-path.middlewares=strip-api-prefix"
+      - "traefik.http.middlewares.strip-api-prefix.stripprefix.prefixes=/api/echo"
+      - "traefik.http.routers.whoami-b-path.service=whoami-b"
+    networks:
+      - it-stack-net
+
+  # Load balancing demo — two replicas behind one router
+  whoami-lb:
+    image: traefik/whoami:latest
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.whoami-lb.rule=Host(`lb.lab.localhost`)"
+      - "traefik.http.routers.whoami-lb.entrypoints=web"
+      - "traefik.http.services.whoami-lb.loadbalancer.server.port=80"
     networks:
       - it-stack-net
 
 networks:
   it-stack-net:
     driver: bridge
-
-volumes:
-  traefik_data:
