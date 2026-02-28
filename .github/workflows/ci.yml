@@ -25,9 +25,15 @@ jobs:
           echo "Validating: docker/docker-compose.lan.yml"
           docker compose -f docker/docker-compose.lan.yml config -q
           echo "OK: docker/docker-compose.lan.yml"
-          for f in docker/docker-compose.advanced.yml \
-                   docker/docker-compose.sso.yml docker/docker-compose.integration.yml \
-                   docker/docker-compose.production.yml; do
+          for f in docker/docker-compose.advanced.yml docker/docker-compose.sso.yml; do
+            echo "Checking scaffold: $f"
+            docker compose -f "$f" config --no-interpolate -q 2>&1 && echo "OK: $f" \
+              || echo "WARN: $f has placeholder variables (scaffold — not yet built out)"
+          done
+          echo "Validating: docker/docker-compose.integration.yml"
+          docker compose -f docker/docker-compose.integration.yml config -q
+          echo "OK: docker/docker-compose.integration.yml"
+          for f in docker/docker-compose.production.yml; do
             echo "Checking scaffold: $f"
             docker compose -f "$f" config --no-interpolate -q 2>&1 && echo "OK: $f" \
               || echo "WARN: $f has placeholder variables (scaffold — not yet built out)"
@@ -208,3 +214,36 @@ jobs:
       - name: Cleanup
         if: always()
         run: docker compose -f docker/docker-compose.sso.yml down -v
+
+  lab-05-smoke:
+    name: Lab 05 -- Traefik + Keycloak + ForwardAuth + Prometheus
+    runs-on: ubuntu-latest
+    needs: validate
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get install -y curl netcat-openbsd
+
+      - name: Start integration stack
+        run: docker compose -f docker/docker-compose.integration.yml up -d
+
+      - name: Wait for Keycloak
+        run: timeout 200 bash -c 'until curl -sf http://localhost:8080/health/ready | grep -q UP; do sleep 5; done'
+
+      - name: Wait for Traefik
+        run: timeout 60 bash -c 'until curl -sf http://localhost:8080/api/version | grep -q Version; do sleep 3; done'
+
+      - name: Run Lab 18-05 test script
+        env:
+          KC_PASS: "Lab05Password!"
+        run: bash tests/labs/test-lab-18-05.sh
+
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose -f docker/docker-compose.integration.yml logs
+
+      - name: Cleanup
+        if: always()
+        run: docker compose -f docker/docker-compose.integration.yml down -v

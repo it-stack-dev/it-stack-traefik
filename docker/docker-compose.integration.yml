@@ -1,26 +1,160 @@
-# Lab 05 — Advanced Integration: traefik with full IT-Stack ecosystem
----
 services:
+
+  # ── Keycloak DB ───────────────────────────────────────────────────
+  kc-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: kcadmin
+      POSTGRES_PASSWORD: Lab05Password!
+    networks:
+      - kc-db-net
+    volumes:
+      - kc-db-int:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kcadmin"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ── Keycloak SSO ──────────────────────────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    command: start-dev
+    depends_on:
+      kc-db:
+        condition: service_healthy
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: Lab05Password!
+      KC_DB: postgres
+      KC_DB_URL: "jdbc:postgresql://kc-db:5432/keycloak"
+      KC_DB_USERNAME: kcadmin
+      KC_DB_PASSWORD: Lab05Password!
+      KC_HTTP_PORT: "8080"
+      KC_HOSTNAME_STRICT: "false"
+      KC_PROXY: edge
+    networks:
+      - proxy-int-net
+      - kc-db-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.keycloak.rule=PathPrefix(`/realms`) || PathPrefix(`/admin/realms`)"
+      - "traefik.http.routers.keycloak.entrypoints=web"
+      - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
+
+  # ── oauth2-proxy (ForwardAuth) ────────────────────────────────────
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    command:
+      - --provider=oidc
+      - --oidc-issuer-url=http://keycloak:8080/realms/it-stack
+      - --client-id=oauth2-proxy
+      - --client-secret=Lab05Password!
+      - --cookie-secret=YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4
+      - --email-domain=*
+      - --upstream=static://202
+      - --http-address=0.0.0.0:4180
+      - --redirect-url=http://localhost:4180/oauth2/callback
+      - --cookie-secure=false
+      - --skip-jwt-bearer-tokens=true
+    networks:
+      - proxy-int-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.oauth2.rule=PathPrefix(`/oauth2`)"
+      - "traefik.http.routers.oauth2.entrypoints=web"
+      - "traefik.http.services.oauth2.loadbalancer.server.port=4180"
+
+  # ── Protected app (requires SSO) ─────────────────────────────────
+  app-protected:
+    image: traefik/whoami:latest
+    environment:
+      WHOAMI_NAME: "protected-app"
+    networks:
+      - proxy-int-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app-protected.rule=PathPrefix(`/protected`)"
+      - "traefik.http.routers.app-protected.entrypoints=web"
+      - "traefik.http.routers.app-protected.middlewares=forward-auth,secure-headers"
+      - "traefik.http.middlewares.forward-auth.forwardauth.address=http://oauth2-proxy:4180"
+      - "traefik.http.middlewares.forward-auth.forwardauth.trustForwardHeader=true"
+      - "traefik.http.middlewares.secure-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.secure-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.services.app-protected.loadbalancer.server.port=80"
+
+  # ── Public app (no auth) ──────────────────────────────────────────
+  app-public:
+    image: traefik/whoami:latest
+    environment:
+      WHOAMI_NAME: "public-app"
+    networks:
+      - proxy-int-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app-public.rule=PathPrefix(`/public`)"
+      - "traefik.http.routers.app-public.entrypoints=web"
+      - "traefik.http.services.app-public.loadbalancer.server.port=80"
+
+  # ── Prometheus: scrapes Traefik metrics ───────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=1h
+    volumes:
+      - ./integration/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - proxy-int-net
+
+  # ── Traefik ───────────────────────────────────────────────────────
   traefik:
     image: traefik:v3.0
-    container_name: it-stack-traefik
-    restart: unless-stopped
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.metrics.address=:8082
+      - --metrics.prometheus=true
+      - --metrics.prometheus.entrypoint=metrics
+      - --metrics.prometheus.addRoutersLabels=true
+      - --metrics.prometheus.addServicesLabels=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --accesslog=true
+      - --accesslog.format=json
     ports:
-      - "80:$firstPort"
-    environment:
-      - IT_STACK_ENV=lab-05-integration
-      - KEYCLOAK_URL=
-      - DB_HOST=
-      - REDIS_HOST=
-      - SMTP_HOST=
-      - GRAYLOG_HOST=
-    extra_hosts:
-      - "lab-id1:10.0.50.11"
-      - "lab-db1:10.0.50.12"
-      - "lab-proxy1:10.0.50.15"
+      - "80:80"
+      - "8080:8080"
+      - "8082:8082"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-logs:/var/log/traefik
     networks:
-      - it-stack-net
+      - proxy-int-net
+    depends_on:
+      keycloak:
+        condition: service_healthy
 
 networks:
-  it-stack-net:
+  proxy-int-net:
     driver: bridge
+  kc-db-net:
+    driver: bridge
+    internal: true
+
+volumes:
+  kc-db-int:
+  traefik-logs:
